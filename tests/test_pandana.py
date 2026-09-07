@@ -1,4 +1,7 @@
 import os.path
+import inspect
+import tracemalloc
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -302,7 +305,7 @@ def test_shortest_path_lengths(sample_osm):
 def test_shortest_path_lengths_unconnected_warning_is_bounded():
     nodes_a = np.arange(20)
     nodes_b = np.arange(100, 120)
-    lens = np.full(20, pdna._UNCONNECTED_DISTANCE)
+    lens = [pdna._UNCONNECTED_DISTANCE] * 20
 
     with pytest.warns(UserWarning) as record:
         pdna._warn_unconnected_shortest_paths(nodes_a, nodes_b, lens)
@@ -316,7 +319,8 @@ def test_shortest_path_lengths_unconnected_warning_is_bounded():
     assert "(19, 119)" not in message
 
 
-def test_shortest_path_lengths_warns_for_disconnected_public_path():
+@pytest.mark.parametrize("input_kind", ["list", "array", "series"])
+def test_shortest_path_lengths_warns_for_disconnected_public_path(input_kind):
     node_x = pd.Series([0.0, 1.0, 10.0, 11.0], index=[10, 11, 20, 21])
     node_y = pd.Series([0.0, 0.0, 0.0, 0.0], index=node_x.index)
     edge_from = pd.Series([10, 20])
@@ -324,13 +328,63 @@ def test_shortest_path_lengths_warns_for_disconnected_public_path():
     edge_weights = pd.DataFrame({"weight": [1.0, 1.0]})
     net = pdna.Network(node_x, node_y, edge_from, edge_to, edge_weights)
 
-    with pytest.warns(UserWarning) as record:
-        lens = net.shortest_path_lengths([10, 10, 20], [11, 20, 21])
+    nodes_a, nodes_b = [10, 10, 20], [11, 20, 21]
+    if input_kind == "array":
+        nodes_a, nodes_b = np.array(nodes_a), np.array(nodes_b)
+    elif input_kind == "series":
+        nodes_a = pd.Series(nodes_a, index=[100, 200, 300])
+        nodes_b = pd.Series(nodes_b, index=[400, 500, 600])
 
+    with pytest.warns(UserWarning) as record:
+        call_line = inspect.currentframe().f_lineno + 1
+        lens = net.shortest_path_lengths(nodes_a, nodes_b)
+
+    assert isinstance(lens, list)
     assert np.array_equal(lens, np.array([1.0, pdna._UNCONNECTED_DISTANCE, 1.0]))
+    assert len(record) == 1
+    assert record[0].filename == __file__
+    assert record[0].lineno == call_line
     message = str(record[0].message)
     assert "1 external unconnected node pairs" in message
     assert "(10, 20)" in message
+
+
+@pytest.mark.parametrize("disconnected", [False, True])
+def test_shortest_path_warning_extra_memory_is_bounded(disconnected):
+    size = 200000
+    nodes_a, nodes_b = [10] * size, [20] * size
+    lens = [pdna._UNCONNECTED_DISTANCE if disconnected else 1.0] * size
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        tracemalloc.start()
+        try:
+            pdna._warn_unconnected_shortest_paths(nodes_a, nodes_b, lens)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    # Inputs already exist: even a single full-sized temporary exceeds this.
+    assert peak < 65536
+    assert len(record) == int(disconnected)
+
+
+@pytest.mark.parametrize("size, positions", [
+    (0, []), (100, []), (100, [99]), (100, [0, 50, 99]),
+    (100, list(range(80, 100))),
+])
+def test_shortest_path_warning_sample_positions(size, positions):
+    nodes_a, nodes_b = list(range(size)), list(range(1000, 1000 + size))
+    lens = [1.0] * size
+    for i in positions:
+        lens[i] = pdna._UNCONNECTED_DISTANCE
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        pdna._warn_unconnected_shortest_paths(nodes_a, nodes_b, lens)
+    assert len(record) == bool(positions)
+    if positions:
+        message = str(record[0].message)
+        expected = [(nodes_a[i], nodes_b[i]) for i in positions[:10]]
+        assert "%d external unconnected node pairs" % len(positions) in message
+        assert "Sample: %s" % expected in message
 
 
 def test_pois(sample_osm):

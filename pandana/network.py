@@ -22,21 +22,23 @@ def _python_scalar(value):
 
 
 def _warn_unconnected_shortest_paths(nodes_a, nodes_b, lens):
-    lens_array = np.asarray(lens)
-    unconnected_count = 0
-    sample_idx = []
-    for idx, distance in enumerate(lens_array):
-        if distance == _UNCONNECTED_DISTANCE:
-            unconnected_count += 1
-            if len(sample_idx) < _UNCONNECTED_WARNING_SAMPLE_SIZE:
-                sample_idx.append(idx)
+    # The Cython distance query returns a list; count in C without a copy.
+    unconnected_count = lens.count(_UNCONNECTED_DISTANCE)
     if unconnected_count == 0:
         return
 
-    nodes_a_array = np.asarray(nodes_a)
-    nodes_b_array = np.asarray(nodes_b)
+    sample_idx = []
+    start = 0
+    # Search disjoint intervals in C, without slicing or scanning in Python.
+    for _ in range(min(unconnected_count, _UNCONNECTED_WARNING_SAMPLE_SIZE)):
+        idx = lens.index(_UNCONNECTED_DISTANCE, start)
+        sample_idx.append(idx)
+        start = idx + 1
+
+    nodes_a_values = nodes_a.iloc if isinstance(nodes_a, pd.Series) else nodes_a
+    nodes_b_values = nodes_b.iloc if isinstance(nodes_b, pd.Series) else nodes_b
     sample = [
-        (_python_scalar(nodes_a_array[i]), _python_scalar(nodes_b_array[i]))
+        (_python_scalar(nodes_a_values[i]), _python_scalar(nodes_b_values[i]))
         for i in sample_idx
     ]
     warnings.warn(
